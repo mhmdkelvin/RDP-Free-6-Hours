@@ -4,7 +4,7 @@ on: workflow_dispatch
 jobs:
   build:
     runs-on: windows-2022
-    timeout-minutes: 360   # GitHub gratis maksimal kira-kira 6 jam
+    timeout-minutes: 360   # runner gratis kira-kira 6 jam
     steps:
     - name: Download Ngrok & helper
       shell: pwsh
@@ -12,8 +12,8 @@ jobs:
         Invoke-WebRequest https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip -OutFile ngrok.zip
         Expand-Archive -LiteralPath ngrok.zip -DestinationPath . -Force
 
-    # Cek secret masuk (tanpa membocorkan token)
-    - name: Debug: check NGROK_AUTH_TOKEN presence
+    # Cek secret masuk (tidak membocorkan token)
+    - name: "Debug: check NGROK_AUTH_TOKEN presence"
       shell: pwsh
       run: |
         if ($Env:NGROK_AUTH_TOKEN) {
@@ -36,16 +36,15 @@ jobs:
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
-
+        # Pastikan service RDP jalan
+        Set-Service -Name TermService -StartupType Automatic
+        Start-Service TermService
         # Buat user admin khusus RDP (hindari error "user name could not be found")
         $pwd = $Env:RDP_PASSWORD
-        if ([string]::IsNullOrWhiteSpace($pwd)) { $pwd = '@HarApito' }   # fallback aman (bisa diganti via secret)
+        if ([string]::IsNullOrWhiteSpace($pwd)) { $pwd = '@HarApito' }   # bisa diganti via secret RDP_PASSWORD
         net user rdpuser $pwd /add
         net localgroup administrators rdpuser /add
-
-        # Mask password di log kalau pakai secret
         if ($Env:RDP_PASSWORD) { Write-Output "::add-mask::$pwd" }
-
       env:
         RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
 
@@ -55,36 +54,34 @@ jobs:
         $p = Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 3389 --region ap --log=stdout" -RedirectStandardOutput "ngrok.log" -RedirectStandardError "ngrok.err" -WindowStyle Hidden -PassThru
         Write-Host "Started ngrok PID=$($p.Id)"
 
-    - name: Wait for tunnel & print RDP INFO LOGIN
+    - name: RDP INFO LOGIN
       shell: pwsh
       run: |
         $deadline = (Get-Date).AddMinutes(2)
         $tunnel = $null
         while ((Get-Date) -lt $deadline) {
           if (Test-Path ngrok.log) {
-            $m = Select-String -Path ngrok.log -Pattern 'url=tcp://([^\s]+)' -SimpleMatch:$false | Select-Object -Last 1
+            $m = Select-String -Path ngrok.log -Pattern 'url=tcp://([^\s]+)' | Select-Object -Last 1
             if ($m) { $tunnel = ($m.Matches[0].Groups[1].Value); break }
           }
           Start-Sleep -Seconds 2
         }
         if (-not $tunnel) {
-          Write-Host "NGROK LOG:"
+          Write-Host "NGROK LOG (tail):"
           Get-Content ngrok.log -ErrorAction SilentlyContinue | Select-Object -Last 50
-          Write-Host "NGROK ERR:"
+          Write-Host "NGROK ERR (tail):"
           Get-Content ngrok.err -ErrorAction SilentlyContinue | Select-Object -Last 50
-          Write-Error "Gagal mendapatkan alamat ngrok TCP. Cek: token, region, atau tunnel lama di dashboard ngrok (terminate)."
+          Write-Error "Gagal mendapatkan alamat ngrok TCP. Cek token/region atau terminate tunnel lama di dashboard ngrok."
           exit 1
         }
-
         $host,$port = ($tunnel -replace '^tcp://','').Split(':')
-        $pwd = if ($Env:RDP_PASSWORD) { '(from secret RDP_PASSWORD)' } else { '@HarApito' }
-
+        $pwdShown = if ($Env:RDP_PASSWORD) { '(from secret RDP_PASSWORD)' } else { '@HarApito' }
         Write-Host ""
         Write-Host "================= RDP INFO LOGIN ================="
         Write-Host "Host / IP  : $host"
         Write-Host "Port       : $port"
         Write-Host "Username   : rdpuser"
-        Write-Host "Password   : $pwd"
+        Write-Host "Password   : $pwdShown"
         Write-Host "=================================================="
         Write-Host ""
 
