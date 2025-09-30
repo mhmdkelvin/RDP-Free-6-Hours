@@ -4,15 +4,23 @@ on: workflow_dispatch
 jobs:
   build:
     runs-on: windows-2022
-    timeout-minutes: 360   # runner gratis kira-kira 6 jam
+    timeout-minutes: 360
     steps:
-    - name: Download Ngrok & helper
+    - name: Download Ngrok
       shell: pwsh
       run: |
         Invoke-WebRequest https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip -OutFile ngrok.zip
         Expand-Archive -LiteralPath ngrok.zip -DestinationPath . -Force
 
-    # Cek secret masuk (tidak membocorkan token)
+    # Cari ngrok.exe di mana pun berada lalu export ke env NGROK_EXE
+    - name: "Detect ngrok.exe path"
+      shell: pwsh
+      run: |
+        $ng = Get-ChildItem -Recurse -File -Filter ngrok.exe | Select-Object -First 1
+        if (-not $ng) { Write-Error "ngrok.exe not found after unzip"; exit 1 }
+        "NGROK_EXE=$($ng.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        Write-Host "Using NGROK_EXE at: $($ng.FullName)"
+
     - name: "Debug: check NGROK_AUTH_TOKEN presence"
       shell: pwsh
       run: |
@@ -25,23 +33,21 @@ jobs:
 
     - name: Connect Ngrok (save authtoken)
       shell: pwsh
-      run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
+      run: |
+        & "$Env:NGROK_EXE" authtoken $Env:NGROK_AUTH_TOKEN
       env:
         NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
 
     - name: Enable RDP + create user
       shell: pwsh
       run: |
-        # Aktifkan RDP & Firewall
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
-        # Pastikan service RDP jalan
         Set-Service -Name TermService -StartupType Automatic
         Start-Service TermService
-        # Buat user admin khusus RDP (hindari error "user name could not be found")
         $pwd = $Env:RDP_PASSWORD
-        if ([string]::IsNullOrWhiteSpace($pwd)) { $pwd = '@HarApito' }   # bisa diganti via secret RDP_PASSWORD
+        if ([string]::IsNullOrWhiteSpace($pwd)) { $pwd = '@HarApito' }
         net user rdpuser $pwd /add
         net localgroup administrators rdpuser /add
         if ($Env:RDP_PASSWORD) { Write-Output "::add-mask::$pwd" }
@@ -51,7 +57,7 @@ jobs:
     - name: Start ngrok TCP 3389 in background (log to file)
       shell: pwsh
       run: |
-        $p = Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 3389 --region ap --log=stdout" -RedirectStandardOutput "ngrok.log" -RedirectStandardError "ngrok.err" -WindowStyle Hidden -PassThru
+        $p = Start-Process -FilePath "$Env:NGROK_EXE" -ArgumentList "tcp 3389 --region ap --log=stdout" -RedirectStandardOutput "ngrok.log" -RedirectStandardError "ngrok.err" -WindowStyle Hidden -PassThru
         Write-Host "Started ngrok PID=$($p.Id)"
 
     - name: RDP INFO LOGIN
@@ -76,14 +82,12 @@ jobs:
         }
         $host,$port = ($tunnel -replace '^tcp://','').Split(':')
         $pwdShown = if ($Env:RDP_PASSWORD) { '(from secret RDP_PASSWORD)' } else { '@HarApito' }
-        Write-Host ""
-        Write-Host "================= RDP INFO LOGIN ================="
+        Write-Host "`n================= RDP INFO LOGIN ================="
         Write-Host "Host / IP  : $host"
         Write-Host "Port       : $port"
         Write-Host "Username   : rdpuser"
         Write-Host "Password   : $pwdShown"
-        Write-Host "=================================================="
-        Write-Host ""
+        Write-Host "==================================================`n"
 
     - name: Keep alive (jangan tutup halaman Actions)
       shell: pwsh
